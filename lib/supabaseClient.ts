@@ -1,20 +1,53 @@
 import { createClient } from "@supabase/supabase-js";
 
+export type Profile = {
+  id: string;
+  display_name: string;
+  avatar_color: string;
+  points: number;
+};
+
 export type Chore = {
   id: string;
   name: string;
   interval_minutes: number;
   snooze_minutes: number;
   next_due_at: string;
+  is_paused: boolean;
+  last_completed_by: string | null;
+  claimed_by: string | null;
 };
 
-type Database = {
+export type ChoreHistory = {
+  id: string;
+  chore_id: string;
+  profile_id: string;
+  action_type: string;
+  created_at: string;
+};
+
+export type Database = {
   public: {
     Tables: {
+      profiles: {
+        Row: Profile;
+        Insert: Omit<Profile, "points"> & { points?: number };
+        Update: Partial<Omit<Profile, "id">>;
+        Relationships: [];
+      };
       chores: {
         Row: Chore;
         Insert: Omit<Chore, "id"> & { id?: string };
-        Update: Partial<Chore>;
+        Update: Partial<Omit<Chore, "id">>;
+        Relationships: [];
+      };
+      chore_history: {
+        Row: ChoreHistory;
+        Insert: Omit<ChoreHistory, "id" | "created_at"> & {
+          id?: string;
+          created_at?: string;
+        };
+        Update: Partial<Omit<ChoreHistory, "id">>;
         Relationships: [];
       };
     };
