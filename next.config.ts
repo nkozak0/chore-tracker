@@ -9,6 +9,9 @@ const withPWA = withPWAInit({
   dest: "public",
   sw: "/next-pwa-sw.js",
   disable: process.env.NODE_ENV === "development",
+  workboxOptions: {
+    importScripts: ["/sw.js"],
+  },
 });
 
 export default withPWA(nextConfig);

@@ -23,6 +23,7 @@ export type ChoreHistory = {
   chore_id: string;
   profile_id: string;
   action_type: string;
+  note: string | null;
   created_at: string;
 };
 
@@ -43,9 +44,10 @@ export type Database = {
       };
       chore_history: {
         Row: ChoreHistory;
-        Insert: Omit<ChoreHistory, "id" | "created_at"> & {
+        Insert: Omit<ChoreHistory, "id" | "created_at" | "note"> & {
           id?: string;
           created_at?: string;
+          note?: string | null;
         };
         Update: Partial<Omit<ChoreHistory, "id">>;
         Relationships: [];

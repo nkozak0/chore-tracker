@@ -17,14 +17,17 @@ import {
   ListChecks,
   LoaderCircle,
   LogOut,
+  MessageSquareText,
   Moon,
   Plus,
+  Settings as SettingsIcon,
   Sparkles,
   Sun,
   Trophy,
   Users,
   X,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ProfileAvatar } from "@/app/components/profile-avatar";
 import {
@@ -42,6 +45,8 @@ const choreSelect =
   "id, name, interval_minutes, snooze_minutes, next_due_at, is_paused, last_completed_by, claimed_by" as const;
 const profileSelect = "id, display_name, avatar_color, points" as const;
 const historySelect =
+  "id, chore_id, profile_id, action_type, note, created_at" as const;
+const legacyHistorySelect =
   "id, chore_id, profile_id, action_type, created_at" as const;
 
 type ChoreForm = {
@@ -180,14 +185,28 @@ function createHistoryEntry(
   choreId: string,
   profileId: string,
   actionType: string,
+  note: string | null = null,
 ): ChoreHistory {
   return {
     id: crypto.randomUUID(),
     chore_id: choreId,
     profile_id: profileId,
     action_type: actionType,
+    note,
     created_at: new Date().toISOString(),
   };
+}
+
+function toHistoryInsert(entry: ChoreHistory) {
+  const baseEntry = {
+    id: entry.id,
+    chore_id: entry.chore_id,
+    profile_id: entry.profile_id,
+    action_type: entry.action_type,
+    created_at: entry.created_at,
+  };
+
+  return entry.note ? { ...baseEntry, note: entry.note } : baseEntry;
 }
 
 function actionCopy(actionType: string) {
@@ -465,6 +484,20 @@ function ActivityFeed({
                     <p className="mt-1 text-xs text-zinc-600">
                       {formatRelativeTime(entry.created_at, now)}
                     </p>
+                    {entry.note &&
+                    (entry.action_type === "completed" ||
+                      entry.action_type === "complete") ? (
+                      <div className="mt-3 flex gap-2 rounded-2xl border border-cyan-200/10 bg-cyan-200/[0.045] px-3 py-2.5">
+                        <MessageSquareText
+                          aria-hidden="true"
+                          className="mt-0.5 shrink-0 text-cyan-300/70"
+                          size={14}
+                        />
+                        <p className="min-w-0 whitespace-pre-wrap break-words text-xs leading-5 text-zinc-400">
+                          {entry.note}
+                        </p>
+                      </div>
+                    ) : null}
                   </div>
                 </li>
               );
@@ -549,6 +582,8 @@ export function Dashboard() {
   const [pendingActions, setPendingActions] = useState<
     Record<string, string>
   >({});
+  const [completionChore, setCompletionChore] = useState<Chore | null>(null);
+  const [completionNote, setCompletionNote] = useState("");
   const [notice, setNotice] = useState<Notice | null>(null);
   const [form, setForm] = useState<ChoreForm>({
     name: "",
@@ -565,7 +600,8 @@ export function Dashboard() {
 
   const loadDashboard = useCallback(
     async (selectedProfileId: string) => {
-      const [choresResult, profilesResult, historyResult] = await Promise.all([
+      const [choresResult, profilesResult, initialHistoryResult] =
+        await Promise.all([
         supabase
           .from("chores")
           .select(choreSelect)
@@ -581,8 +617,29 @@ export function Dashboard() {
           .limit(40),
       ]);
 
+      let historyData = initialHistoryResult.data;
+      let historyError = initialHistoryResult.error;
+
+      if (
+        historyError?.code === "42703" &&
+        historyError.message.includes("note")
+      ) {
+        const legacyHistoryResult = await supabase
+          .from("chore_history")
+          .select(legacyHistorySelect)
+          .order("created_at", { ascending: false })
+          .limit(40);
+
+        historyError = legacyHistoryResult.error;
+        historyData =
+          legacyHistoryResult.data?.map((entry) => ({
+            ...entry,
+            note: null,
+          })) ?? null;
+      }
+
       const loadError =
-        choresResult.error ?? profilesResult.error ?? historyResult.error;
+        choresResult.error ?? profilesResult.error ?? historyError;
 
       if (loadError) {
         showNotice(loadError.message);
@@ -600,7 +657,7 @@ export function Dashboard() {
 
       setChores(sortChores(choresResult.data ?? []));
       setProfiles(nextProfiles);
-      setHistory(sortHistory(historyResult.data ?? []));
+      setHistory(sortHistory(historyData ?? []));
       setIsLoading(false);
     },
     [router, showNotice],
@@ -715,6 +772,19 @@ export function Dashboard() {
     return () => window.clearTimeout(timeout);
   }, [notice]);
 
+  useEffect(() => {
+    if (!completionChore) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [completionChore]);
+
   const profilesById = useMemo(
     () => new Map(profiles.map((profile) => [profile.id, profile])),
     [profiles],
@@ -782,7 +852,7 @@ export function Dashboard() {
         .from("chores")
         .update({ claimed_by: profileId })
         .eq("id", chore.id),
-      supabase.from("chore_history").insert(entry),
+      supabase.from("chore_history").insert(toHistoryInsert(entry)),
     ]);
 
     if (choreResult.error || historyResult.error) {
@@ -816,7 +886,7 @@ export function Dashboard() {
         .from("chores")
         .update({ next_due_at: nextDueAt })
         .eq("id", chore.id),
-      supabase.from("chore_history").insert(entry),
+      supabase.from("chore_history").insert(toHistoryInsert(entry)),
     ]);
 
     if (choreResult.error || historyResult.error) {
@@ -852,7 +922,7 @@ export function Dashboard() {
 
     const [choreResult, historyResult] = await Promise.all([
       supabase.from("chores").update(patch).eq("id", chore.id),
-      supabase.from("chore_history").insert(entry),
+      supabase.from("chore_history").insert(toHistoryInsert(entry)),
     ]);
 
     if (choreResult.error || historyResult.error) {
@@ -866,7 +936,23 @@ export function Dashboard() {
     setPending(chore.id, null);
   }
 
-  async function completeChore(chore: Chore) {
+  function requestCompletion(chore: Chore) {
+    setCompletionNote("");
+    setCompletionChore(chore);
+  }
+
+  function finalizeCompletion(note: string) {
+    if (!completionChore) {
+      return;
+    }
+
+    const chore = completionChore;
+    setCompletionChore(null);
+    setCompletionNote("");
+    void completeChore(chore, note);
+  }
+
+  async function completeChore(chore: Chore, note: string) {
     if (!profileId || !currentProfile || chore.is_paused) {
       return;
     }
@@ -875,7 +961,13 @@ export function Dashboard() {
       Date.now() + chore.interval_minutes * 60 * 1000,
     ).toISOString();
     const nextPoints = currentProfile.points + 10;
-    const entry = createHistoryEntry(chore.id, profileId, "completed");
+    const trimmedNote = note.trim();
+    const entry = createHistoryEntry(
+      chore.id,
+      profileId,
+      "completed",
+      trimmedNote || null,
+    );
     const chorePatch = {
       next_due_at: nextDueAt,
       last_completed_by: profileId,
@@ -899,7 +991,7 @@ export function Dashboard() {
         .from("profiles")
         .update({ points: nextPoints })
         .eq("id", profileId),
-      supabase.from("chore_history").insert(entry),
+      supabase.from("chore_history").insert(toHistoryInsert(entry)),
     ]);
 
     const mutationError =
@@ -1038,6 +1130,15 @@ export function Dashboard() {
               <span className="hidden text-xs text-zinc-500 sm:inline">pts</span>
             </div>
 
+            <Link
+              aria-label="Settings"
+              className="flex size-10 items-center justify-center rounded-xl border border-white/[0.07] bg-white/[0.035] text-zinc-500 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
+              href="/settings"
+              title="Settings"
+            >
+              <SettingsIcon aria-hidden="true" size={17} />
+            </Link>
+
             <button
               aria-label="Log out"
               className="flex size-10 items-center justify-center rounded-xl border border-white/[0.07] bg-white/[0.035] text-zinc-500 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300"
@@ -1165,7 +1266,7 @@ export function Dashboard() {
                         void claimChore(selectedChore)
                       }
                       onComplete={(selectedChore) =>
-                        void completeChore(selectedChore)
+                        requestCompletion(selectedChore)
                       }
                       onSnooze={(selectedChore) =>
                         void snoozeChore(selectedChore)
@@ -1196,6 +1297,90 @@ export function Dashboard() {
           </aside>
         </div>
       </div>
+
+      <AnimatePresence>
+        {completionChore ? (
+          <motion.div
+            animate={{ opacity: 1 }}
+            aria-labelledby="completion-note-title"
+            aria-modal="true"
+            className="fixed inset-0 z-40 flex items-end justify-center bg-black/70 p-3 backdrop-blur-md sm:items-center sm:p-6"
+            exit={{ opacity: 0 }}
+            initial={{ opacity: 0 }}
+            role="dialog"
+          >
+            <motion.section
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              className="relative w-full max-w-md overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-zinc-900 via-zinc-950 to-black p-5 shadow-[0_30px_100px_rgba(0,0,0,0.7)] sm:p-6"
+              exit={
+                reduceMotion
+                  ? { opacity: 0 }
+                  : { opacity: 0, y: 14, scale: 0.98 }
+              }
+              initial={
+                reduceMotion
+                  ? { opacity: 0 }
+                  : { opacity: 0, y: 22, scale: 0.97 }
+              }
+              transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <div
+                aria-hidden="true"
+                className="absolute inset-x-12 top-0 h-px bg-gradient-to-r from-transparent via-cyan-300/60 to-transparent"
+              />
+
+              <div className="flex items-start gap-4">
+                <div className="flex size-11 shrink-0 items-center justify-center rounded-2xl border border-cyan-200/15 bg-cyan-300/10 text-cyan-200 shadow-[0_10px_35px_rgba(34,211,238,0.08)]">
+                  <MessageSquareText aria-hidden="true" size={20} />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-cyan-200">
+                    {completionChore.name}
+                  </p>
+                  <h2
+                    className="mt-1 text-xl font-semibold leading-7 text-white sm:text-2xl"
+                    id="completion-note-title"
+                  >
+                    Thank you! Would you like to add any notes?
+                  </h2>
+                </div>
+              </div>
+
+              <label className="mt-6 grid gap-2 text-xs font-medium text-zinc-500">
+                Note
+                <textarea
+                  autoFocus
+                  className="min-h-28 w-full resize-none rounded-2xl border border-white/[0.08] bg-black/35 px-4 py-3 text-sm leading-6 text-white outline-none transition-colors placeholder:text-zinc-700 focus:border-cyan-300/40"
+                  maxLength={500}
+                  onChange={(event) => setCompletionNote(event.target.value)}
+                  placeholder="Anything the household should know?"
+                  value={completionNote}
+                />
+              </label>
+
+              <div className="mt-5 grid grid-cols-2 gap-3">
+                <motion.button
+                  className="h-11 rounded-xl border border-white/10 bg-white/5 px-4 text-sm font-semibold text-zinc-300 transition-colors hover:bg-white/10 hover:text-white"
+                  onClick={() => finalizeCompletion("")}
+                  type="button"
+                  whileTap={reduceMotion ? undefined : { scale: 0.975 }}
+                >
+                  Skip
+                </motion.button>
+                <motion.button
+                  className="flex h-11 items-center justify-center gap-2 rounded-xl bg-cyan-300 px-4 text-sm font-semibold text-zinc-950 shadow-[0_10px_35px_rgba(34,211,238,0.12)] transition-colors hover:bg-cyan-200"
+                  onClick={() => finalizeCompletion(completionNote)}
+                  type="button"
+                  whileTap={reduceMotion ? undefined : { scale: 0.975 }}
+                >
+                  <Check aria-hidden="true" size={17} />
+                  Save Note
+                </motion.button>
+              </div>
+            </motion.section>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
       <AnimatePresence>
         {notice ? (
