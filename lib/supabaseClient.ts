@@ -27,6 +27,14 @@ export type ChoreHistory = {
   created_at: string;
 };
 
+export type PushSubscriptionRecord = {
+  id: string;
+  endpoint: string;
+  auth_key: string;
+  p256dh_key: string;
+  created_at: string;
+};
+
 export type Database = {
   public: {
     Tables: {
@@ -50,6 +58,15 @@ export type Database = {
           note?: string | null;
         };
         Update: Partial<Omit<ChoreHistory, "id">>;
+        Relationships: [];
+      };
+      push_subscriptions: {
+        Row: PushSubscriptionRecord;
+        Insert: Omit<PushSubscriptionRecord, "id" | "created_at"> & {
+          id?: string;
+          created_at?: string;
+        };
+        Update: Partial<Omit<PushSubscriptionRecord, "id">>;
         Relationships: [];
       };
     };

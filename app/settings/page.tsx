@@ -96,6 +96,53 @@ async function getPushRegistration() {
   });
 }
 
+async function savePushSubscription(subscription: PushSubscription) {
+  const serializedSubscription = subscription.toJSON();
+  const endpoint = serializedSubscription.endpoint ?? subscription.endpoint;
+  const authKey = serializedSubscription.keys?.auth;
+  const p256dhKey = serializedSubscription.keys?.p256dh;
+
+  if (!endpoint || !authKey || !p256dhKey) {
+    const keyError = new Error(
+      "The browser subscription is missing its endpoint or encryption keys.",
+    );
+    console.error("Push subscription could not be serialized:", keyError);
+    throw keyError;
+  }
+
+  const { error } = await supabase.from("push_subscriptions").upsert(
+    {
+      endpoint,
+      auth_key: authKey,
+      p256dh_key: p256dhKey,
+    },
+    {
+      onConflict: "endpoint",
+    },
+  );
+
+  if (error) {
+    console.error("Push subscription Supabase upsert failed:", error);
+    throw error;
+  }
+
+  console.log("Push subscription saved to Supabase:", { endpoint });
+}
+
+async function removePushSubscription(endpoint: string) {
+  const { error } = await supabase
+    .from("push_subscriptions")
+    .delete()
+    .eq("endpoint", endpoint);
+
+  if (error) {
+    console.error("Push subscription Supabase delete failed:", error);
+    throw error;
+  }
+
+  console.log("Push subscription removed from Supabase:", { endpoint });
+}
+
 function getPushStatusCopy(status: PushStatus) {
   switch (status) {
     case "subscribed":
@@ -193,6 +240,7 @@ export default function SettingsPage() {
       setPushSubscription(subscription);
 
       if (subscription) {
+        await savePushSubscription(subscription);
         window.localStorage.setItem(
           pushSubscriptionStorageKey,
           JSON.stringify(subscription.toJSON()),
@@ -269,12 +317,14 @@ export default function SettingsPage() {
 
     try {
       if (pushSubscription) {
+        const endpoint = pushSubscription.endpoint;
         const unsubscribed = await pushSubscription.unsubscribe();
 
         if (!unsubscribed) {
           throw new Error("The subscription could not be removed.");
         }
 
+        await removePushSubscription(endpoint);
         window.localStorage.removeItem(pushSubscriptionStorageKey);
         setPushSubscription(null);
         setPushStatus("unsubscribed");
@@ -302,6 +352,7 @@ export default function SettingsPage() {
         applicationServerKey: urlBase64ToUint8Array(vapidKey),
       });
 
+      await savePushSubscription(subscription);
       window.localStorage.setItem(
         pushSubscriptionStorageKey,
         JSON.stringify(subscription.toJSON()),
