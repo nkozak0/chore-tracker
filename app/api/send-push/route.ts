@@ -1,77 +1,155 @@
 import { NextResponse } from "next/server";
-import webpush from "web-push";
-import { createClient } from "@supabase/supabase-js";
 
-// 1. Initialize web-push with your environment variables
-const subject = process.env.VAPID_SUBJECT || "mailto:test@example.com";
-// Note: Using NEXT_PUBLIC_VAPID_KEY to match your Vercel dashboard naming
-const publicKey = process.env.NEXT_PUBLIC_VAPID_KEY || ""; 
-const privateKey = process.env.VAPID_PRIVATE_KEY || "";
+import {
+  configureWebPush,
+  createSupabaseAdminClient,
+  dispatchPushNotifications,
+  fetchPushSubscriptions,
+} from "@/lib/pushNotifications";
 
-webpush.setVapidDetails(subject, publicKey, privateKey);
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-// Vercel Cron Jobs default to sending GET requests
-export async function GET(request: Request) {
-  // 2. Security Check: Ensure this request is actually coming from Vercel
-  const authHeader = request.headers.get("authorization");
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
+type ManualPushBody = {
+  choreId?: unknown;
+  choreName?: unknown;
+  completedBy?: unknown;
+  nextDueAt?: unknown;
+};
 
-  // 3. Initialize Supabase Admin Client (Bypasses RLS)
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
-  
-  if (!supabaseUrl || !supabaseServiceKey) {
-    return NextResponse.json({ error: "Missing Supabase credentials" }, { status: 500 });
-  }
+function getBearerToken(request: Request) {
+  const authorization = request.headers.get("authorization");
 
-  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  return authorization?.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : null;
+}
 
+export async function POST(request: Request) {
   try {
-    // 4. Fetch the subscriptions
-    const { data: subscriptions, error: subError } = await supabase
-      .from("push_subscriptions")
-      .select("*");
+    const accessToken = getBearerToken(request);
 
-    if (subError) throw subError;
-    if (!subscriptions || subscriptions.length === 0) {
-      return NextResponse.json({ message: "No active subscriptions found." }, { status: 200 });
+    if (!accessToken) {
+      return NextResponse.json(
+        { error: "Authentication is required." },
+        { status: 401 },
+      );
     }
 
-    // 5. Build and send the notifications
-    const notifications = subscriptions.map((sub) => {
-      const pushSubscription = {
-        endpoint: sub.endpoint,
-        keys: {
-          auth: sub.auth_key,
-          p256dh: sub.p256dh_key,
+    const supabaseAdmin = createSupabaseAdminClient();
+    const {
+      data: { user },
+      error: authenticationError,
+    } = await supabaseAdmin.auth.getUser(accessToken);
+
+    if (authenticationError || !user) {
+      return NextResponse.json(
+        { error: "The notification session is invalid or expired." },
+        { status: 401 },
+      );
+    }
+
+    let body: ManualPushBody;
+
+    try {
+      body = (await request.json()) as ManualPushBody;
+    } catch {
+      return NextResponse.json(
+        { error: "The request body must be valid JSON." },
+        { status: 400 },
+      );
+    }
+
+    const choreId =
+      typeof body.choreId === "string" ? body.choreId.trim() : "";
+    const completedBy =
+      typeof body.completedBy === "string"
+        ? body.completedBy.trim()
+        : "";
+
+    if (!choreId || !completedBy) {
+      return NextResponse.json(
+        { error: "choreId and completedBy are required." },
+        { status: 400 },
+      );
+    }
+
+    const [choreResult, profileResult] = await Promise.all([
+      supabaseAdmin
+        .from("chores")
+        .select("id, name, next_due_at")
+        .eq("id", choreId)
+        .single(),
+      supabaseAdmin
+        .from("profiles")
+        .select("display_name")
+        .eq("id", completedBy)
+        .maybeSingle(),
+    ]);
+
+    if (choreResult.error || !choreResult.data) {
+      return NextResponse.json(
+        {
+          error:
+            choreResult.error?.message ?? "The completed chore was not found.",
         },
-      };
+        { status: 404 },
+      );
+    }
 
-      const payload = JSON.stringify({
-        title: "Chore Reminder",
-        body: "You have chores due today. Open the app to check your list!",
-      });
+    if (profileResult.error) {
+      console.error(
+        "Completed-by profile lookup failed:",
+        profileResult.error,
+      );
+    }
 
-      // Send the push and catch any errors (like if a user unsubscribed)
-      return webpush
-        .sendNotification(pushSubscription, payload)
-        .catch((err: unknown) => {
-          console.error("Push failed for endpoint:", sub.endpoint, err);
-        });
-    });
+    configureWebPush();
+    const subscriptions =
+      await fetchPushSubscriptions(supabaseAdmin);
+    const completedByName =
+      profileResult.data?.display_name ?? "Someone";
+    const delivery = await dispatchPushNotifications(
+      subscriptions,
+      {
+        title: `${completedByName} completed a chore`,
+        body: `${choreResult.data.name} is complete.`,
+        choreId: choreResult.data.id,
+        tag: `chore-completed-${choreResult.data.id}`,
+        url: "/",
+      },
+    );
 
-    // Wait for all notifications to be sent
-    await Promise.all(notifications);
+    const allDeliveriesFailed =
+      delivery.attempted > 0 && delivery.sent === 0;
 
-    return NextResponse.json({ 
-      success: true, 
-      delivered: notifications.length 
-    }, { status: 200 });
-
+    return NextResponse.json(
+      {
+        success: !allDeliveriesFailed,
+        error: allDeliveriesFailed
+          ? "No subscribed device accepted the notification."
+          : undefined,
+        message:
+          subscriptions.length === 0
+            ? "The chore was completed, but no devices are subscribed."
+            : allDeliveriesFailed
+              ? "No subscribed device accepted the notification."
+              : "The completion notification handoff finished.",
+        delivery,
+      },
+      { status: allDeliveriesFailed ? 502 : 200 },
+    );
   } catch (error) {
-    console.error("Cron Job Error:", error);
-    return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
+    console.error("Manual push notification route failed:", error);
+
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : "The notification handoff failed.",
+      },
+      { status: 500 },
+    );
   }
 }

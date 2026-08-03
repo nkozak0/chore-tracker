@@ -1004,9 +1004,24 @@ export function Dashboard() {
     }
 
     try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError || !session) {
+        throw (
+          sessionError ??
+          new Error("The notification session has expired.")
+        );
+      }
+
       const response = await fetch("/api/send-push", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           choreId: chore.id,
           choreName: chore.name,
@@ -1016,10 +1031,22 @@ export function Dashboard() {
       });
 
       if (!response.ok) {
-        throw new Error("Push handoff failed");
+        const result = (await response.json().catch(() => null)) as {
+          error?: string;
+          message?: string;
+        } | null;
+
+        throw new Error(
+          result?.error ?? result?.message ?? "Push handoff failed",
+        );
       }
-    } catch {
-      showNotice("Completed, but the notification handoff did not respond.");
+    } catch (error) {
+      console.error("Completion notification handoff failed:", error);
+      showNotice(
+        error instanceof Error
+          ? `Completed, but notifications failed: ${error.message}`
+          : "Completed, but the notification handoff did not respond.",
+      );
     }
 
     setPending(chore.id, null);
