@@ -18,6 +18,7 @@ export default function LoginPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [selectingId, setSelectingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
 
   const loadProfiles = useCallback(async () => {
     const { data, error: loadError } = await supabase
@@ -39,10 +40,44 @@ export default function LoginPage() {
     Promise.resolve().then(loadProfiles);
   }, [loadProfiles]);
 
-  function chooseProfile(profile: Profile) {
+  async function chooseProfile(profile: Profile) {
     setSelectingId(profile.id);
-    selectProfile(profile.id);
-    router.replace("/");
+    setSelectionError(null);
+
+    try {
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError) {
+        throw sessionError;
+      }
+
+      if (!session) {
+        const { data, error: signInError } =
+          await supabase.auth.signInAnonymously();
+
+        if (signInError) {
+          throw signInError;
+        }
+
+        if (!data.session || !data.user) {
+          throw new Error("Supabase did not return an anonymous session.");
+        }
+      }
+
+      selectProfile(profile.id);
+      router.replace("/");
+    } catch (authError) {
+      console.error("Anonymous Supabase sign-in failed:", authError);
+      setSelectionError(
+        authError instanceof Error
+          ? authError.message
+          : "A secure session could not be started.",
+      );
+      setSelectingId(null);
+    }
   }
 
   return (
@@ -109,75 +144,85 @@ export default function LoginPage() {
               </p>
             </div>
           ) : (
-            <motion.div
-              animate="visible"
-              className="grid grid-cols-2 gap-3 sm:grid-cols-3"
-              initial={reduceMotion ? false : "hidden"}
-              variants={{
-                hidden: {},
-                visible: { transition: { staggerChildren: 0.055 } },
-              }}
-            >
-              {profiles.map((profile) => {
-                const isSelecting = selectingId === profile.id;
+            <>
+              <motion.div
+                animate="visible"
+                className="grid grid-cols-2 gap-3 sm:grid-cols-3"
+                initial={reduceMotion ? false : "hidden"}
+                variants={{
+                  hidden: {},
+                  visible: { transition: { staggerChildren: 0.055 } },
+                }}
+              >
+                {profiles.map((profile) => {
+                  const isSelecting = selectingId === profile.id;
 
-                return (
-                  <motion.button
-                    className="group relative min-h-40 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] p-4 text-left outline-none transition-colors hover:border-white/20 hover:bg-white/[0.065] focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:cursor-wait disabled:opacity-60"
-                    disabled={selectingId !== null}
-                    key={profile.id}
-                    onClick={() => chooseProfile(profile)}
-                    type="button"
-                    variants={{
-                      hidden: { opacity: 0, y: 12 },
-                      visible: {
-                        opacity: 1,
-                        y: 0,
-                        transition: {
-                          duration: 0.35,
-                          ease: [0.22, 1, 0.36, 1],
+                  return (
+                    <motion.button
+                      className="group relative min-h-40 overflow-hidden rounded-2xl border border-white/10 bg-white/[0.035] p-4 text-left outline-none transition-colors hover:border-white/20 hover:bg-white/[0.065] focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:cursor-wait disabled:opacity-60"
+                      disabled={selectingId !== null}
+                      key={profile.id}
+                      onClick={() => void chooseProfile(profile)}
+                      type="button"
+                      variants={{
+                        hidden: { opacity: 0, y: 12 },
+                        visible: {
+                          opacity: 1,
+                          y: 0,
+                          transition: {
+                            duration: 0.35,
+                            ease: [0.22, 1, 0.36, 1],
+                          },
                         },
-                      },
-                    }}
-                    whileTap={reduceMotion ? undefined : { scale: 0.975 }}
-                  >
-                    <span
-                      aria-hidden="true"
-                      className="pointer-events-none absolute -right-8 -top-8 size-28 rounded-full opacity-15 blur-3xl transition-opacity group-hover:opacity-25"
-                      style={{ backgroundColor: profile.avatar_color }}
-                    />
-                    <ProfileAvatar
-                      className="size-14 text-lg"
-                      color={profile.avatar_color}
-                      name={profile.display_name}
-                    />
-                    <span className="mt-5 flex items-end justify-between gap-2">
-                      <span className="min-w-0">
-                        <span className="block truncate font-semibold text-white">
-                          {profile.display_name}
+                      }}
+                      whileTap={reduceMotion ? undefined : { scale: 0.975 }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute -right-8 -top-8 size-28 rounded-full opacity-15 blur-3xl transition-opacity group-hover:opacity-25"
+                        style={{ backgroundColor: profile.avatar_color }}
+                      />
+                      <ProfileAvatar
+                        className="size-14 text-lg"
+                        color={profile.avatar_color}
+                        name={profile.display_name}
+                      />
+                      <span className="mt-5 flex items-end justify-between gap-2">
+                        <span className="min-w-0">
+                          <span className="block truncate font-semibold text-white">
+                            {profile.display_name}
+                          </span>
+                          <span className="mt-1 block text-xs text-zinc-500">
+                            {profile.points} points
+                          </span>
                         </span>
-                        <span className="mt-1 block text-xs text-zinc-500">
-                          {profile.points} points
-                        </span>
+                        {isSelecting ? (
+                          <LoaderCircle
+                            aria-hidden="true"
+                            className="mb-0.5 shrink-0 animate-spin text-cyan-200"
+                            size={18}
+                          />
+                        ) : (
+                          <ChevronRight
+                            aria-hidden="true"
+                            className="mb-0.5 shrink-0 text-zinc-600 transition-transform group-hover:translate-x-0.5 group-hover:text-zinc-300"
+                            size={18}
+                          />
+                        )}
                       </span>
-                      {isSelecting ? (
-                        <LoaderCircle
-                          aria-hidden="true"
-                          className="mb-0.5 shrink-0 animate-spin text-cyan-200"
-                          size={18}
-                        />
-                      ) : (
-                        <ChevronRight
-                          aria-hidden="true"
-                          className="mb-0.5 shrink-0 text-zinc-600 transition-transform group-hover:translate-x-0.5 group-hover:text-zinc-300"
-                          size={18}
-                        />
-                      )}
-                    </span>
-                  </motion.button>
-                );
-              })}
-            </motion.div>
+                    </motion.button>
+                  );
+                })}
+              </motion.div>
+              {selectionError ? (
+                <p
+                  className="mt-4 rounded-xl border border-rose-400/20 bg-rose-400/5 px-4 py-3 text-sm text-rose-200"
+                  role="alert"
+                >
+                  {selectionError}
+                </p>
+              ) : null}
+            </>
           )}
         </div>
       </motion.section>

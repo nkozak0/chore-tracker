@@ -82,18 +82,106 @@ function urlBase64ToUint8Array(base64String: string) {
   return Uint8Array.from(rawData, (character) => character.charCodeAt(0));
 }
 
-async function getPushRegistration() {
-  const existingRegistration =
-    await navigator.serviceWorker.getRegistration("/");
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  step: string,
+) {
+  let timeoutId: number | undefined;
 
-  if (existingRegistration) {
-    return existingRegistration;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+          reject(new Error(`${step} timed out after ${timeoutMs}ms.`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+    }
+  }
+}
+
+function waitForServiceWorkerActivation(
+  registration: ServiceWorkerRegistration,
+) {
+  if (registration.active) {
+    return Promise.resolve(registration);
   }
 
-  return navigator.serviceWorker.register("/next-pwa-sw.js", {
-    scope: "/",
-    updateViaCache: "none",
+  const worker =
+    registration.installing ?? registration.waiting ?? registration.active;
+
+  if (!worker) {
+    return Promise.reject(
+      new Error("The service worker registration has no worker to activate."),
+    );
+  }
+
+  if (worker.state === "activated") {
+    return Promise.resolve(registration);
+  }
+
+  return new Promise<ServiceWorkerRegistration>((resolve, reject) => {
+    const handleStateChange = () => {
+      if (worker.state === "activated") {
+        worker.removeEventListener("statechange", handleStateChange);
+        resolve(registration);
+      } else if (worker.state === "redundant") {
+        worker.removeEventListener("statechange", handleStateChange);
+        reject(
+          new Error("The service worker became redundant before activation."),
+        );
+      }
+    };
+
+    worker.addEventListener("statechange", handleStateChange);
   });
+}
+
+async function getPushRegistration() {
+  try {
+    const existingRegistration =
+      await navigator.serviceWorker.getRegistration("/");
+
+    if (existingRegistration?.active) {
+      console.log("Using existing active service worker registration:", {
+        scriptURL: existingRegistration.active.scriptURL,
+        scope: existingRegistration.scope,
+      });
+      return existingRegistration;
+    }
+
+    console.log(
+      "No active service worker registration found. Registering /next-pwa-sw.js.",
+    );
+
+    const registration = await navigator.serviceWorker.register(
+      "/next-pwa-sw.js",
+      {
+        scope: "/",
+        updateViaCache: "none",
+      },
+    );
+    const activeRegistration =
+      await waitForServiceWorkerActivation(registration);
+
+    console.log("Service worker registered and activated:", {
+      scriptURL: activeRegistration.active?.scriptURL,
+      scope: activeRegistration.scope,
+    });
+
+    return activeRegistration;
+  } catch (error) {
+    console.error(
+      "Explicit service worker registration failed for /next-pwa-sw.js:",
+      error,
+    );
+    throw error;
+  }
 }
 
 async function savePushSubscription(subscription: PushSubscription) {
@@ -110,8 +198,33 @@ async function savePushSubscription(subscription: PushSubscription) {
     throw keyError;
   }
 
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError) {
+    console.error(
+      "Push subscription authentication check failed:",
+      authError,
+    );
+    throw authError;
+  }
+
+  if (!user) {
+    const missingUserError = new Error(
+      "No authenticated Supabase user is available. Select your profile again.",
+    );
+    console.error(
+      "Push subscription authentication check failed:",
+      missingUserError,
+    );
+    throw missingUserError;
+  }
+
   const { error } = await supabase.from("push_subscriptions").upsert(
     {
+      user_id: user.id,
       endpoint,
       auth_key: authKey,
       p256dh_key: p256dhKey,
@@ -126,14 +239,42 @@ async function savePushSubscription(subscription: PushSubscription) {
     throw error;
   }
 
-  console.log("Push subscription saved to Supabase:", { endpoint });
+  console.log("Push subscription saved to Supabase:", {
+    endpoint,
+    userId: user.id,
+  });
 }
 
 async function removePushSubscription(endpoint: string) {
+  const {
+    data: { user },
+    error: authError,
+  } = await supabase.auth.getUser();
+
+  if (authError) {
+    console.error(
+      "Push subscription authentication check failed before delete:",
+      authError,
+    );
+    throw authError;
+  }
+
+  if (!user) {
+    const missingUserError = new Error(
+      "No authenticated Supabase user is available. Select your profile again.",
+    );
+    console.error(
+      "Push subscription authentication check failed before delete:",
+      missingUserError,
+    );
+    throw missingUserError;
+  }
+
   const { error } = await supabase
     .from("push_subscriptions")
     .delete()
-    .eq("endpoint", endpoint);
+    .eq("endpoint", endpoint)
+    .eq("user_id", user.id);
 
   if (error) {
     console.error("Push subscription Supabase delete failed:", error);
@@ -223,35 +364,56 @@ export default function SettingsPage() {
       !("PushManager" in window) ||
       !("Notification" in window)
     ) {
+      console.error(
+        "Push subscription check failed: Service Worker, PushManager, or Notification API is unsupported.",
+      );
       setPushStatus("unsupported");
       return;
     }
 
     if (Notification.permission === "denied") {
+      console.error(
+        "Push subscription check failed: notification permission is denied.",
+      );
       setPushStatus("denied");
       return;
     }
 
     try {
-      const registration = await getPushRegistration();
-      const subscription =
-        await registration.pushManager.getSubscription();
+      const registration = await withTimeout(
+        getPushRegistration(),
+        20_000,
+        "Service worker registration",
+      );
+      const subscription = await withTimeout(
+        registration.pushManager.getSubscription(),
+        10_000,
+        "Existing push subscription lookup",
+      );
 
       setPushSubscription(subscription);
 
       if (subscription) {
-        await savePushSubscription(subscription);
+        await withTimeout(
+          savePushSubscription(subscription),
+          15_000,
+          "Existing subscription Supabase upsert",
+        );
         window.localStorage.setItem(
           pushSubscriptionStorageKey,
           JSON.stringify(subscription.toJSON()),
         );
         setPushStatus("subscribed");
       } else if (!process.env.NEXT_PUBLIC_VAPID_KEY) {
+        console.error(
+          "Push subscription check failed: NEXT_PUBLIC_VAPID_KEY is missing.",
+        );
         setPushStatus("missing-key");
       } else {
         setPushStatus("unsubscribed");
       }
-    } catch {
+    } catch (error) {
+      console.error("Push subscription inspection failed:", error);
       setPushStatus("error");
     }
   }, []);
@@ -303,28 +465,60 @@ export default function SettingsPage() {
   }, [notice]);
 
   async function togglePushNotifications() {
-    if (
-      pushStatus === "checking" ||
-      pushStatus === "unsupported" ||
-      pushStatus === "missing-key" ||
-      pushStatus === "denied" ||
-      isUpdatingPush
-    ) {
+    if (isUpdatingPush) {
       return;
     }
 
     setIsUpdatingPush(true);
 
     try {
+      if (
+        !("serviceWorker" in navigator) ||
+        !("PushManager" in window) ||
+        !("Notification" in window)
+      ) {
+        console.error(
+          "Push subscription failed: Service Worker, PushManager, or Notification API is unsupported.",
+        );
+        setPushStatus("unsupported");
+        showNotice("Push notifications are not supported on this device.");
+        return;
+      }
+
       if (pushSubscription) {
         const endpoint = pushSubscription.endpoint;
-        const unsubscribed = await pushSubscription.unsubscribe();
+        let unsubscribed: boolean;
 
-        if (!unsubscribed) {
-          throw new Error("The subscription could not be removed.");
+        try {
+          unsubscribed = await withTimeout(
+            pushSubscription.unsubscribe(),
+            10_000,
+            "Browser push unsubscription",
+          );
+        } catch (error) {
+          console.error("PushManager unsubscribe failed:", error);
+          throw error;
         }
 
-        await removePushSubscription(endpoint);
+        if (!unsubscribed) {
+          const unsubscribeError = new Error(
+            "The browser subscription could not be removed.",
+          );
+          console.error("PushManager unsubscribe failed:", unsubscribeError);
+          throw unsubscribeError;
+        }
+
+        try {
+          await withTimeout(
+            removePushSubscription(endpoint),
+            15_000,
+            "Supabase subscription delete",
+          );
+        } catch (error) {
+          console.error("Supabase subscription delete failed:", error);
+          throw error;
+        }
+
         window.localStorage.removeItem(pushSubscriptionStorageKey);
         setPushSubscription(null);
         setPushStatus("unsubscribed");
@@ -335,24 +529,78 @@ export default function SettingsPage() {
       const vapidKey = process.env.NEXT_PUBLIC_VAPID_KEY;
 
       if (!vapidKey) {
+        console.error(
+          "Push subscription failed: NEXT_PUBLIC_VAPID_KEY is missing.",
+        );
         setPushStatus("missing-key");
+        showNotice("The public VAPID key is missing.");
         return;
       }
 
-      const permission = await Notification.requestPermission();
+      let permission: NotificationPermission;
+
+      try {
+        permission = await withTimeout(
+          Notification.requestPermission(),
+          60_000,
+          "Notification permission request",
+        );
+      } catch (error) {
+        console.error("Notification.requestPermission failed:", error);
+        throw error;
+      }
 
       if (permission !== "granted") {
+        console.error(
+          `Push subscription stopped: notification permission is ${permission}.`,
+        );
         setPushStatus(permission === "denied" ? "denied" : "unsubscribed");
         return;
       }
 
-      const registration = await getPushRegistration();
-      const subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey),
-      });
+      let registration: ServiceWorkerRegistration;
 
-      await savePushSubscription(subscription);
+      try {
+        registration = await withTimeout(
+          getPushRegistration(),
+          20_000,
+          "Explicit service worker registration and activation",
+        );
+      } catch (error) {
+        console.error(
+          "Explicit service worker registration failed before PushManager.subscribe:",
+          error,
+        );
+        throw error;
+      }
+
+      let subscription: PushSubscription;
+
+      try {
+        subscription = await withTimeout(
+          registration.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: urlBase64ToUint8Array(vapidKey),
+          }),
+          20_000,
+          "PushManager.subscribe",
+        );
+      } catch (error) {
+        console.error("PushManager.subscribe failed:", error);
+        throw error;
+      }
+
+      try {
+        await withTimeout(
+          savePushSubscription(subscription),
+          15_000,
+          "Supabase subscription upsert",
+        );
+      } catch (error) {
+        console.error("Supabase subscription insert/upsert failed:", error);
+        throw error;
+      }
+
       window.localStorage.setItem(
         pushSubscriptionStorageKey,
         JSON.stringify(subscription.toJSON()),
@@ -361,6 +609,7 @@ export default function SettingsPage() {
       setPushStatus("subscribed");
       showNotice("Notifications enabled on this device.", "success");
     } catch (error) {
+      console.error("Push notification toggle failed:", error);
       setPushStatus("error");
       showNotice(
         error instanceof Error
@@ -368,6 +617,7 @@ export default function SettingsPage() {
           : "Notification setup could not be completed.",
       );
     } finally {
+      console.log("Push notification toggle finished; clearing loading state.");
       setIsUpdatingPush(false);
     }
   }

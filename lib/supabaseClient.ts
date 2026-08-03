@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import { createBrowserClient } from "@supabase/ssr";
 
 export type Profile = {
   id: string;
@@ -29,6 +29,7 @@ export type ChoreHistory = {
 
 export type PushSubscriptionRecord = {
   id: string;
+  user_id: string;
   endpoint: string;
   auth_key: string;
   p256dh_key: string;
@@ -82,4 +83,14 @@ if (!supabaseUrl || !supabaseAnonKey) {
   throw new Error("Missing Supabase environment variables.");
 }
 
-export const supabase = createClient<Database>(supabaseUrl, supabaseAnonKey);
+const browserSupabaseUrl = supabaseUrl;
+const browserSupabaseAnonKey = supabaseAnonKey;
+
+export function createClient() {
+  return createBrowserClient<Database>(
+    browserSupabaseUrl,
+    browserSupabaseAnonKey,
+  );
+}
+
+export const supabase = createClient();
